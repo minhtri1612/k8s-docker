@@ -1,0 +1,168 @@
+package common
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
+	specs "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+// MockDockerClient implements dockerclient.APIClient for testing
+type MockDockerClient struct {
+	client.APIClient
+	Containers      []types.Container
+	Created         []string
+	Removed         []string
+	Started         []string
+	LastHostConfig  *container.HostConfig
+	LastConfig      *container.Config
+	LastPullOptions image.PullOptions
+	// HealthStatus allows tests to simulate Docker health check results
+	HealthStatus string
+}
+
+func (m *MockDockerClient) ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error) {
+	return m.Containers, nil
+}
+
+func (m *MockDockerClient) ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error) {
+	// Simple mock: find in Containers list
+	// Note: containerID might be Name or ID.
+	for _, c := range m.Containers {
+		match := false
+		if c.ID == containerID {
+			match = true
+		}
+		for _, name := range c.Names {
+			// Docker names start with /
+			if name == containerID || name == "/"+containerID {
+				match = true
+				break
+			}
+		}
+
+		if match {
+			// Build health status
+			var health *types.Health
+			if m.HealthStatus != "" {
+				health = &types.Health{
+					Status: m.HealthStatus,
+				}
+			}
+
+			// Build config from last create call or defaults
+			cfg := &container.Config{
+				Image: c.Image,
+			}
+			if m.LastConfig != nil {
+				cfg = m.LastConfig
+			}
+
+			hostCfg := &container.HostConfig{}
+			if m.LastHostConfig != nil {
+				hostCfg = m.LastHostConfig
+			}
+
+			// Construct minimal ContainerJSON
+			var networks map[string]*network.EndpointSettings
+			if c.NetworkSettings != nil {
+				networks = c.NetworkSettings.Networks
+			}
+
+			return types.ContainerJSON{
+				ContainerJSONBase: &types.ContainerJSONBase{
+					ID: c.ID,
+					State: &types.ContainerState{
+						Status:  c.State,
+						Running: c.State == "running",
+						Health:  health,
+					},
+					Name:       c.Names[0], // Use first name
+					HostConfig: hostCfg,
+				},
+				Config: cfg,
+				NetworkSettings: &types.NetworkSettings{
+					NetworkSettingsBase: types.NetworkSettingsBase{},
+					Networks:            networks,
+				},
+			}, nil
+		}
+	}
+	return types.ContainerJSON{}, errdefs.NotFound(fmt.Errorf("container not found"))
+}
+
+func (m *MockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
+	m.Created = append(m.Created, containerName)
+	m.LastHostConfig = hostConfig
+	m.LastConfig = config
+	id := "mock-id-" + containerName
+	// Add to containers list
+	m.Containers = append(m.Containers, types.Container{
+		ID:    id,
+		Names: []string{"/" + containerName},
+		Image: config.Image,
+		State: "created",
+	})
+	return container.CreateResponse{ID: id}, nil
+}
+
+func (m *MockDockerClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
+	m.Started = append(m.Started, containerID)
+	// Update state
+	for i := range m.Containers {
+		if m.Containers[i].ID == containerID {
+			m.Containers[i].State = "running"
+		}
+	}
+	return nil
+}
+
+func (m *MockDockerClient) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
+	return nil
+}
+
+func (m *MockDockerClient) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
+	m.Removed = append(m.Removed, containerID)
+	// Remove from list if present (simple mock)
+	for i, c := range m.Containers {
+		if c.ID == containerID {
+			m.Containers = append(m.Containers[:i], m.Containers[i+1:]...)
+			break
+		}
+	}
+	// Also try to remove by name
+	for i, c := range m.Containers {
+		for _, name := range c.Names {
+			if name == containerID || name == "/"+containerID {
+				m.Containers = append(m.Containers[:i], m.Containers[i+1:]...)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func (m *MockDockerClient) ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error) {
+	m.LastPullOptions = options
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (m *MockDockerClient) Ping(ctx context.Context) (types.Ping, error) {
+	return types.Ping{APIVersion: "1.41"}, nil
+}
+
+func (m *MockDockerClient) ImageInspectWithRaw(ctx context.Context, imageID string) (types.ImageInspect, []byte, error) {
+	return types.ImageInspect{}, nil, nil
+}
+
+func (m *MockDockerClient) Close() error {
+	return nil
+}

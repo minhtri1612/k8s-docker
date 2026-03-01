@@ -1,0 +1,14 @@
+apiVersion: kdop.io.vn/v1alpha1
+kind: DockerService
+metadata:
+  name: nginx-lb
+spec:
+  # Load Balance across containers with this label
+  selector:
+    matchLabels:
+      app: nginx-scaled
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 80
+  networkMode: kind
